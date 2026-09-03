@@ -391,6 +391,11 @@ async function installHelperApp(sourcePath) {
 	await ensureHelperParentDirectory();
 	const version = await packageVersion();
 	const infoPlistPath = path.join(helperAppPath, "Contents", "Info.plist");
+	// Swift may leave an adjacent `<output>.cstemp` while compiling. It is not
+	// part of the app and must never remain under Contents/MacOS: codesign
+	// treats every file there as a sealed resource, which invalidates TCC
+	// identity checks even when the Settings toggles are enabled.
+	await fs.rm(`${helperAppExecutablePath}.cstemp`, { force: true }).catch(() => {});
 	const infoPlist = `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
@@ -432,6 +437,7 @@ async function installHelperApp(sourcePath) {
 	await fs.mkdir(path.dirname(helperSourceHashPath), { recursive: true });
 	await fs.copyFile(sourcePath, helperAppExecutablePath);
 	await fs.chmod(helperAppExecutablePath, 0o755);
+	await fs.rm(`${helperAppExecutablePath}.cstemp`, { force: true }).catch(() => {});
 	await fs.writeFile(infoPlistPath, infoPlist);
 	await fs.writeFile(helperSourceHashPath, `${sourceHash}\n`);
 	await signHelper(helperAppPath, helperBundleId);
