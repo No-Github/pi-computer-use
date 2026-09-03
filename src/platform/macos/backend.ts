@@ -69,6 +69,19 @@ function helperAction(request: PlatformActRequest): Record<string, unknown> {
 	return { ...request, target: request.target.focus, params: { ...request.params, preserveFocus: true } };
 }
 
+export function buildMacosObserveArgs(request: PlatformObserveRequest): Record<string, unknown> {
+	return {
+		...(request.target.pid && request.target.pid > 0 ? { pid: request.target.pid } : {}),
+		baseLookId: request.baseLookId,
+		...(request.target.windowId && request.target.windowId > 0 ? { windowId: request.target.windowId } : {}),
+		windowRef: request.target.rootRef,
+		maxDimension: request.maxDimension,
+		readText: request.readText,
+		scopeRef: request.scopeRef,
+		includeImage: request.includeImage,
+	};
+}
+
 export const macosBackend: Pick<ComputerUsePlatformBackend, "listApps" | "listRoots" | "getFrontmost" | "focusWindow" | "observe" | "act" | "actBatch" | "readText" | "waitFor"> = {
 	async listApps(signal?: AbortSignal): Promise<PlatformApp[]> {
 		return parseApps(await macosHelper.command<unknown>("listApps", {}, { signal }));
@@ -101,15 +114,7 @@ export const macosBackend: Pick<ComputerUsePlatformBackend, "listApps" | "listRo
 	},
 
 	async observe(request: PlatformObserveRequest, options?: { timeoutMs?: number; signal?: AbortSignal }): Promise<LookResponse> {
-		return parseLookResponse(await macosHelper.command("look", {
-			baseLookId: request.baseLookId,
-			...(request.target.windowId > 0 ? { windowId: request.target.windowId } : {}),
-			windowRef: request.target.rootRef,
-			maxDimension: request.maxDimension,
-			readText: request.readText,
-			scopeRef: request.scopeRef,
-			includeImage: request.includeImage,
-		}, options));
+		return parseLookResponse(await macosHelper.command("look", buildMacosObserveArgs(request), options));
 	},
 
 	async act(request: PlatformActRequest, options?: { timeoutMs?: number; signal?: AbortSignal }): Promise<HelperActResult> {

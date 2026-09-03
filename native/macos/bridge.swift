@@ -1308,6 +1308,7 @@ final class Bridge {
 	}
 
 	private func look(_ request: [String: Any]) throws -> [String: Any] {
+		let requestedPid = optionalIntArg(request, "pid").map { Int32($0) }
 		let windowId = optionalIntArg(request, "windowId").map { UInt32($0) }
 		let windowRef = optionalStringArg(request, "windowRef")
 		let maxDimension = optionalIntArg(request, "maxDimension").map { max(1, $0) }
@@ -1329,6 +1330,12 @@ final class Bridge {
 		let pid: Int32
 		if let windowId, let ownerPid = pidForWindowId(windowId) {
 			pid = ownerPid
+		} else if let requestedPid, requestedPid > 0 {
+			// Some Accessibility providers return a valid window element whose
+			// AXUIElementGetPid lookup is temporarily unavailable. The caller has
+			// already resolved this root from the same app, so its PID is the
+			// authoritative fallback while windowElement re-resolves the window.
+			pid = requestedPid
 		} else if let requestedRoot, let owner = pidForElement(requestedRoot) {
 			pid = owner
 		} else {
