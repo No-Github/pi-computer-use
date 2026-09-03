@@ -73,11 +73,16 @@ export async function ensurePermissions(
 	let status = await bridge.checkPermissions(signal);
 	if (allGranted(status, bridge.kinds)) return status;
 
-	if (!ctx.hasUI) throw new Error(bridge.copy.nonInteractiveError(helperPath));
-
 	// Register before prompting so platform settings panes can already list
-	// the helper and the user only has to enable existing entries.
+	// the helper and the user only has to enable existing entries. This also
+	// matters for headless hosts: a helper can keep a stale TCC answer until it
+	// is restarted after the user grants access in System Settings.
 	await bridge.registerPermissions(signal).catch(() => undefined);
+	await bridge.restartHelper(signal).catch(() => undefined);
+	status = await bridge.checkPermissions(signal);
+	if (allGranted(status, bridge.kinds)) return status;
+
+	if (!ctx.hasUI) throw new Error(bridge.copy.nonInteractiveError(helperPath));
 
 	while (!allGranted(status, bridge.kinds)) {
 		throwIfAborted(signal);

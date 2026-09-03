@@ -122,7 +122,7 @@ export async function ensureMacosReady(
 			{
 				kinds: macosPermissionKinds,
 				copy: {
-					nonInteractiveError: (helperPath) => `pi-computer-use setup requires an interactive session. Start pi in interactive mode. ${GRANT_INSTRUCTIONS}\nHelper path: ${helperPath}`,
+					nonInteractiveError: (helperPath) => `pi-computer-use macOS permissions are still missing. ${GRANT_INSTRUCTIONS}\nHelper path: ${helperPath} Restart the helper after changing permissions, then retry.`,
 					prompt: permissionPrompt,
 					incompleteError: (helperPath) => `pi-computer-use setup is incomplete. ${GRANT_INSTRUCTIONS} Helper path: ${helperPath}`,
 					readyMessage: "pi-computer-use is ready.",
