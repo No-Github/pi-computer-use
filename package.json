@@ -1,6 +1,6 @@
 {
 	"name": "@injaneity/pi-computer-use",
-	"version": "0.5.2",
+	"version": "0.5.3",
 	"description": "Pi extension that lets AI agents observe and control macOS, Windows, and Linux apps.",
 	"type": "module",
 	"keywords": [
@@ -70,7 +70,8 @@
 		"test:signing": "node scripts/check-local-signing.mjs",
 		"test:macos-path": "node scripts/check-macos-helper-path.mjs",
 		"test:macos-observe": "tsx scripts/check-macos-observe-request.mjs",
-		"test": "npm run typecheck && npm run test:schema && npm run test:output && npm run test:lifecycle && npm run test:runtime && npm run test:root-lifecycle && npm run test:action-transaction && npm run test:visual-target && npm run test:verification && npm run test:action-effect && npm run test:invariants && npm run test:platform && npm run test:linux && npm run test:linux-scripts && npm run test:signing && npm run test:macos-path && npm run test:macos-observe",
+		"test:macos-helper-update": "tsx scripts/check-macos-helper-update.mjs",
+		"test": "npm run typecheck && npm run test:schema && npm run test:output && npm run test:lifecycle && npm run test:runtime && npm run test:root-lifecycle && npm run test:action-transaction && npm run test:visual-target && npm run test:verification && npm run test:action-effect && npm run test:invariants && npm run test:platform && npm run test:linux && npm run test:linux-scripts && npm run test:signing && npm run test:macos-path && npm run test:macos-observe && npm run test:macos-helper-update",
 		"build:native": "node scripts/build-native.mjs",
 		"build:windows": "node scripts/build-native.mjs --platform windows",
 		"build:linux": "node scripts/build-native.mjs --platform linux",

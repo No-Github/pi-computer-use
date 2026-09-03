@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { constants as fsConstants } from "node:fs";
-import { access, mkdir, realpath } from "node:fs/promises";
+import { access, mkdir, readFile, realpath } from "node:fs/promises";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
@@ -22,6 +22,8 @@ const usingExternalHelperSocket = HELPER_SOCKET_PATH !== DEFAULT_HELPER_SOCKET_P
 
 const PACKAGE_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 const SETUP_HELPER_SCRIPT = path.join(PACKAGE_ROOT, "scripts", "setup-helper.mjs");
+const PACKAGE_JSON_PATH = path.join(PACKAGE_ROOT, "package.json");
+const INSTALLED_INFO_PLIST_PATH = path.join(HELPER_APP_PATH, "Contents", "Info.plist");
 
 export class HelperTransportError extends Error {
 	constructor(message: string) {
@@ -72,6 +74,28 @@ async function isResolvedHelperExecutable(filePath?: string): Promise<boolean> {
 		realpath(HELPER_APP_EXECUTABLE_PATH).catch(() => path.resolve(HELPER_APP_EXECUTABLE_PATH)),
 	]);
 	return actualPath === expectedPath;
+}
+
+async function packageVersion(): Promise<string | undefined> {
+	try {
+		const manifest = JSON.parse(await readFile(PACKAGE_JSON_PATH, "utf8")) as { version?: unknown };
+		return typeof manifest.version === "string" && manifest.version.length > 0 ? manifest.version : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+async function installedHelperVersion(): Promise<string | undefined> {
+	try {
+		const info = await readFile(INSTALLED_INFO_PLIST_PATH, "utf8");
+		return info.match(/<key>CFBundleVersion<\/key>\s*<string>([^<]+)<\/string>/)?.[1];
+	} catch {
+		return undefined;
+	}
+}
+
+export function helperVersionNeedsRefresh(expectedVersion: string | undefined, installedVersion: string | undefined): boolean {
+	return Boolean(expectedVersion && expectedVersion !== installedVersion);
 }
 
 export async function runProcess(
@@ -151,7 +175,12 @@ export class MacosHelperClient {
 		// agent process's hot path. Protocol compatibility is checked against the
 		// live daemon immediately afterwards.
 		if (await isExecutable(HELPER_APP_EXECUTABLE_PATH)) {
-			return;
+			const [expectedVersion, currentVersion] = await Promise.all([packageVersion(), installedHelperVersion()]);
+			if (!helperVersionNeedsRefresh(expectedVersion, currentVersion)) return;
+			// Stop a daemon that still holds the old helper bundle before setup
+			// replaces and signs it. ensureDaemon() will launch the new binary.
+			await this.daemonCommand("shutdown", {}, 2_000, signal).catch(() => undefined);
+			await sleep(400, signal);
 		}
 
 		// Re-enter Electron and Bun standalone hosts as their JavaScript runtimes.
