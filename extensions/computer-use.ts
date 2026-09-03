@@ -20,19 +20,26 @@ import { getLoadedComputerUseConfig, loadComputerUseConfig } from "../src/config
 
 const stateId = Type.String({ description: "Required state id owning every @e ref used by this operation" });
 const point = { x: Type.Number(), y: Type.Number() };
+const visualTarget = Type.Optional(Type.Object({
+	stateId: Type.String({ description: "Observation state that produced the screenshot" }),
+	capturedAt: Type.Number({ description: "Capture timestamp from observe_ui.details.capture.timestamp" }),
+	rootRef: Type.Optional(Type.String({ description: "Root ref from the same observation" })),
+	rect: Type.Object({ x: Type.Number(), y: Type.Number(), w: Type.Number({ exclusiveMinimum: 0 }), h: Type.Number({ exclusiveMinimum: 0 }) }),
+	label: Type.Optional(Type.String({ maxLength: 256 })),
+}));
 const mouseButton = Type.Optional(Type.Union([Type.Literal("left"), Type.Literal("right"), Type.Literal("middle")]));
-const clickByRef = Type.Object({ action: Type.Literal("click"), ref: Type.String(), button: mouseButton, clickCount: Type.Optional(Type.Number({ minimum: 1, maximum: 3 })) });
-const clickByPoint = Type.Object({ action: Type.Literal("click"), ...point, button: mouseButton, clickCount: Type.Optional(Type.Number({ minimum: 1, maximum: 3 })) });
+const clickByRef = Type.Object({ action: Type.Literal("click"), ref: Type.String(), button: mouseButton, clickCount: Type.Optional(Type.Number({ minimum: 1, maximum: 3 })), visualTarget });
+const clickByPoint = Type.Object({ action: Type.Literal("click"), ...point, button: mouseButton, clickCount: Type.Optional(Type.Number({ minimum: 1, maximum: 3 })), visualTarget });
 const uiAction = Type.Union([
-	Type.Object({ action: Type.Literal("press"), ref: Type.String({ description: "Actionable outline ref" }) }),
+	Type.Object({ action: Type.Literal("press"), ref: Type.String({ description: "Actionable outline ref" }), visualTarget }),
 	clickByRef,
 	clickByPoint,
-	Type.Object({ action: Type.Literal("setText"), ref: Type.String({ description: "Editable outline ref" }), text: Type.String() }),
-	Type.Object({ action: Type.Literal("typeText"), ref: Type.Optional(Type.String({ description: "Omit after a click to type into the focus established by that click" })), text: Type.String() }),
-	Type.Object({ action: Type.Literal("keypress"), ref: Type.Optional(Type.String({ description: "Omit to send keys to the focused control" })), keys: Type.Array(Type.String(), { minItems: 1 }) }),
-	Type.Object({ action: Type.Literal("scroll"), ref: Type.Optional(Type.String()), scrollX: Type.Optional(Type.Number()), scrollY: Type.Optional(Type.Number()) }),
-	Type.Object({ action: Type.Literal("drag"), path: Type.Array(Type.Object(point), { minItems: 2 }) }),
-	Type.Object({ action: Type.Literal("moveMouse"), ...point }),
+	Type.Object({ action: Type.Literal("setText"), ref: Type.String({ description: "Editable outline ref" }), text: Type.String(), visualTarget }),
+	Type.Object({ action: Type.Literal("typeText"), ref: Type.Optional(Type.String({ description: "Omit after a click to type into the focus established by that click" })), text: Type.String(), visualTarget }),
+	Type.Object({ action: Type.Literal("keypress"), ref: Type.Optional(Type.String({ description: "Omit to send keys to the focused control" })), keys: Type.Array(Type.String(), { minItems: 1 }), visualTarget }),
+	Type.Object({ action: Type.Literal("scroll"), ref: Type.Optional(Type.String()), scrollX: Type.Optional(Type.Number()), scrollY: Type.Optional(Type.Number()), visualTarget }),
+	Type.Object({ action: Type.Literal("drag"), path: Type.Array(Type.Object(point), { minItems: 2 }), visualTarget }),
+	Type.Object({ action: Type.Literal("moveMouse"), ...point, visualTarget }),
 ]);
 
 const conditionProperties = {
@@ -68,6 +75,8 @@ const observeTool = defineTool({
 	promptGuidelines: [
 		"Use mode=semantic to skip OCR and images, visual to force them, and fused for automatic selection.",
 		"Use @e outline refs from observe_ui/search_ui for act_ui; pictureOnly refs are coordinate-only and blocked by UI-tree-only policy.",
+		"For desktop interaction, use this tool chain and act_ui; do not use shell commands or AppleScript to simulate mouse or keyboard input.",
+		"If observation fails or a root changes, stop and observe the current root again before choosing coordinates or refs.",
 	],
 	parameters: Type.Object({
 		root: Type.Optional(Type.String({ description: "Exact @r ref issued by find_roots" })),
@@ -113,7 +122,11 @@ const actTool = defineTool({
 	label: "Act",
 	description: "Perform one or more precisely targeted checked actions and return the successor state.",
 	promptSnippet: "Pass dependent click/type steps together and use expect for observable completion.",
-	promptGuidelines: ["After clicking an editable region, omit ref from typeText/keypress so input follows the established focus."],
+	promptGuidelines: [
+		"After clicking an editable region, omit ref from typeText/keypress so input follows the established focus.",
+		"Treat delivery and verification separately: use expect or a successor observation before claiming the task completed.",
+		"Do not replay coordinates or refs from an older stateId, and do not bypass act_ui with shell desktop automation.",
+	],
 	parameters: Type.Object({ stateId, expect: Type.Optional(Type.Object(conditionProperties)), actions: Type.Array(uiAction, { minItems: 1, maxItems: 20 }) }),
 	execute: executeAct,
 });

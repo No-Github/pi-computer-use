@@ -1,6 +1,6 @@
 {
 	"name": "@injaneity/pi-computer-use",
-	"version": "0.5.1",
+	"version": "0.5.2",
 	"description": "Pi extension that lets AI agents observe and control macOS, Windows, and Linux apps.",
 	"type": "module",
 	"keywords": [
@@ -16,12 +16,12 @@
 	"license": "MIT",
 	"repository": {
 		"type": "git",
-		"url": "git+https://github.com/injaneity/pi-computer-use.git"
+		"url": "git+https://github.com/No-Github/pi-computer-use.git"
 	},
 	"bugs": {
 		"url": "https://github.com/injaneity/pi-computer-use/issues"
 	},
-	"homepage": "https://github.com/injaneity/pi-computer-use#readme",
+	"homepage": "https://github.com/No-Github/pi-computer-use#readme",
 	"engines": {
 		"node": ">=20.6.0"
 	},
@@ -57,6 +57,11 @@
 		"test:invariants": "node scripts/check-invariants.mjs",
 		"test:lifecycle": "tsx scripts/check-session-lifecycle.mjs",
 		"test:runtime": "tsx scripts/check-runtime-concurrency.mjs",
+		"test:root-lifecycle": "tsx scripts/check-root-lifecycle.mjs",
+		"test:action-transaction": "tsx scripts/check-action-transaction.mjs",
+		"test:visual-target": "tsx scripts/check-visual-target.mjs",
+		"test:verification": "tsx scripts/check-verification.mjs",
+		"test:action-effect": "tsx scripts/check-action-effect.mjs",
 		"test:output": "tsx scripts/check-bounded-output.mjs",
 		"test:commits": "node scripts/check-commit-messages.mjs",
 		"test:platform": "tsx scripts/check-platform-windows.mjs",
@@ -64,7 +69,7 @@
 		"test:package-assets": "node scripts/check-package-assets.mjs",
 		"test:signing": "node scripts/check-local-signing.mjs",
 		"test:macos-path": "node scripts/check-macos-helper-path.mjs",
-		"test": "npm run typecheck && npm run test:schema && npm run test:output && npm run test:lifecycle && npm run test:runtime && npm run test:invariants && npm run test:platform && npm run test:linux && npm run test:linux-scripts && npm run test:signing && npm run test:macos-path",
+		"test": "npm run typecheck && npm run test:schema && npm run test:output && npm run test:lifecycle && npm run test:runtime && npm run test:root-lifecycle && npm run test:action-transaction && npm run test:visual-target && npm run test:verification && npm run test:action-effect && npm run test:invariants && npm run test:platform && npm run test:linux && npm run test:linux-scripts && npm run test:signing && npm run test:macos-path",
 		"build:native": "node scripts/build-native.mjs",
 		"build:windows": "node scripts/build-native.mjs --platform windows",
 		"build:linux": "node scripts/build-native.mjs --platform linux",

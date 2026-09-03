@@ -8,6 +8,8 @@ find roots → observe one root → search/expand/inspect its state → act from
 
 The agent still sees a multi-root forest. `find_roots` returns stable root refs (`@rN`) for desktop windows, transient surfaces, and CDP pages. Observing one root produces an immutable element tree whose refs (`@eN`) belong only to that returned `stateId`. Progressive disclosure is unchanged: the first outline is folded, while `search_ui`, `expand_ui`, and `inspect_ui` query the full stored tree.
 
+Desktop root records carry a lifecycle generation and last-confirmed timestamp. A stable identity that disappears is treated as closed or replaced; it is never silently rebound to another same-title window. Call `find_roots`/`observe_ui` again to establish a fresh root before acting.
+
 ## Runtime model
 
 Every live request follows one path:
@@ -26,6 +28,8 @@ The implementation keeps that ownership explicit:
 | `view.ts` | Stable public refs and full-versus-changes rendering |
 | `outline.ts` | Parsing and querying complete UI trees |
 | `platform/*` | OS observation, input mechanics, and native protocol translation |
+
+`act_ui` also returns an immutable transaction context in `execution.transaction`. Its phase advances from `observed` to `executing`, `delivered`, optional `verifying`/`verified`, and finally `successor` or `terminal`. A terminal phase never fabricates a successor state.
 
 ```mermaid
 flowchart TB
@@ -99,14 +103,20 @@ act_ui({
 ```
 
 With a postcondition, the backend waits for the requested text or role to
-appear (or disappear with `gone: true`) before reporting success. It records
-whether the condition was newly verified, already present before delivery, or
-failed. A failed postcondition changes the execution outcome to `didnt`; event
-delivery alone is never treated as semantic success.
+appear (or disappear with `gone: true`) before reporting success. The
+execution trace separates `delivery` (`worked`, `didnt`, or `unknown`) from
+`verification` (`verified`, `preexisting`, `failed`, or `not_verified`) and
+includes evidence from the postcondition wait. A failed postcondition changes
+the execution outcome to `didnt`; event delivery alone is never treated as
+semantic success. When no postcondition is supplied, successor state and
+helper evidence are evaluated by the generic action-effect evaluator:
+`setText` requires an exact final value, referenced target changes can verify
+relevant actions, and coordinate actions require explicit helper/root evidence.
+Without such evidence the result remains `not_verified`.
 
 One action is represented by an array of length one. A multi-action transaction is appropriate only when no intermediate observation is needed. The runtime validates one base state, acquires one resource lane, and sends the steps as one native helper transaction. The helper captures one pre-transaction root baseline, executes and verifies steps in order, and stops on the first failed or invalidated step. Partial results include `stoppedAt`, so callers know the exact checked boundary and must re-observe before continuing. The helper performs one final root-delta settle and the bridge produces one final observation. There is no alternate sequential protocol. This is not a mechanism for parallel actions within one UI resource.
 
-The bridge resolves model intent; the backend/helper owns grounding, preflight, delivery, and evidence. Accessibility capabilities choose an initial strategy but are not treated as proof that the intended result occurred. Editable-region clicks establish foreground focus for following unscoped keyboard steps in the same transaction. Raw coordinates are tied to the image-bearing state that produced them. Web-backed editable controls use atomic keyboard events and web-backed buttons use pointer events so application state receives normal input events rather than only a changed AX value. A helper result reports `worked`, `didnt`, or `unknown`, including evidence and shallow root changes where available.
+The bridge resolves model intent; the backend/helper owns grounding, preflight, delivery, and evidence. Accessibility capabilities choose an initial strategy but are not treated as proof that the intended result occurred. Editable-region clicks establish foreground focus for following unscoped keyboard steps in the same transaction. Raw coordinates are tied to the image-bearing state that produced them. Web-backed editable controls use atomic keyboard events and web-backed buttons use pointer events so application state receives normal input events rather than only a changed AX value. A helper result reports `worked`, `didnt`, or `unknown`, including evidence and shallow root changes where available. The bridge compares each referenced target against the successor observation through one generic effect evaluator and never treats unrelated changes after a coordinate action as proof.
 
 With `headless: true`, the background boundary is strict: Pi must never activate or raise an application, change the user's focused window, move the global cursor, post raw input, or display the agent cursor. With `headless: false` (the default), credible semantic activation may begin in the background, editable clicks preserve the focus they establish for following unscoped keyboard input, and keyboard input with a checked `didnt` result may retry in the foreground because the first attempt proved side-effect-free. Focus-preserving native keyboard requests must not raise or re-focus the window between semantic activation and HID delivery; canvas editors such as PowerPoint otherwise collapse an inner text editor back to placeholder selection. Ambiguous pointer outcomes are never replayed. With `cursor_overlay: true`, non-headless macOS background pointer actions enqueue a click-through agent cursor animation to the native grounded point without delaying delivery; foreground HID actions use only the physical cursor.
 

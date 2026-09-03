@@ -33,6 +33,8 @@ Truncated textual output receives an immutable session-local ref such as `@o1`. 
 
 Nodes marked `pictureOnly` have visual evidence but no platform accessibility element. Semantic actions cannot target them. Coordinate actions are available only from a current image-bearing desktop state.
 
+Coordinate actions may include a `visualTarget` carrying the source `stateId`, capture timestamp, root ref, and target rectangle. The bridge rejects a target from a different observation, root, or screenshot, and records visual grounding in `execution.grounding`. A `pictureOnly` element automatically receives the same grounding metadata from its observed rectangle.
+
 ## Progressive disclosure
 
 Use `observe_ui({ root: "@r1" })` for the compact first view. Then query without another capture:
@@ -66,10 +68,19 @@ act_ui({
 })
 ```
 
-Verification reports `verified`, `preexisting`, or `failed`. A preexisting
+Verification reports `verified`, `preexisting`, `failed`, or `not_verified`. A preexisting
 condition means the requested end state holds, but is not evidence that the
 action caused it. Use `ref` for one exact element or `scopeRef` for a subtree;
 role-only conditions must be scoped, and value checks require an exact `ref`.
+
+The structured execution trace keeps delivery separate from verification:
+`delivery` is the helper's `worked`/`didnt`/`unknown` result, while
+`verification` includes a status and evidence. Without `expect`, successor
+state and helper evidence are evaluated generically: `setText` requires an
+exact final value, referenced target changes can verify relevant actions, and
+coordinate actions require explicit helper/root evidence. Otherwise the result
+is `not_verified` so the agent can observe again before claiming the state
+changed.
 
 Batch steps only when the second step does not need to inspect the result of the first:
 

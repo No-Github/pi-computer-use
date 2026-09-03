@@ -75,6 +75,15 @@ export interface UiAction {
 	path?: Array<{ x: number; y: number } | [number, number]>;
 	button?: MouseButtonName;
 	clickCount?: number;
+	visualTarget?: VisualTargetReference;
+}
+
+export interface VisualTargetReference {
+	stateId: string;
+	capturedAt: number;
+	rootRef?: string;
+	rect: { x: number; y: number; w: number; h: number };
+	label?: string;
 }
 
 export interface ActParams extends StateTargetParams {
