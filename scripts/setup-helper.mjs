@@ -414,7 +414,9 @@ async function installHelperApp(sourcePath) {
 	const sourceHash = createHash("sha256").update(sourceExecutable).digest("hex");
 	const existingSourceHash = await fs.readFile(helperSourceHashPath, "utf8").catch(() => undefined);
 	const existingInfoPlist = await fs.readFile(infoPlistPath, "utf8").catch(() => undefined);
-	if (existingSourceHash?.trim() === sourceHash && existingInfoPlist === infoPlist) {
+	const existingExecutable = await fs.readFile(helperAppExecutablePath).catch(() => undefined);
+	const existingExecutableHash = existingExecutable ? createHash("sha256").update(existingExecutable).digest("hex") : undefined;
+	if (existingSourceHash?.trim() === sourceHash && existingExecutableHash === sourceHash && existingInfoPlist === infoPlist) {
 		// If a real signing identity is available, upgrade older ad-hoc installs
 		// in place so local builds have a consistent identity. macOS may still
 		// require permission review after native code changes.
