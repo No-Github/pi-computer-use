@@ -33,6 +33,9 @@ export interface OperationState {
 	currentTarget?: CurrentTarget;
 	currentCapture?: CurrentCapture;
 	currentStateTarget?: StateTargetSnapshot;
+	/** The root that owns the last pointer-established keyboard focus. */
+	currentFocusTarget?: StateTargetSnapshot;
+	currentFocusRef?: string;
 	currentImageMode?: ImageMode;
 	currentLook?: LookResponse;
 	currentOutline?: Outline;
@@ -52,6 +55,8 @@ interface DesktopObservation {
 	outline: SerializedOutline;
 	note?: WindowNote;
 	imageMode?: ImageMode;
+	focusTarget?: StateTargetSnapshot;
+	focusRef?: string;
 }
 
 interface BrowserObservation {
@@ -110,6 +115,8 @@ export class SavedStates {
 			currentTarget: { ...record.value.target },
 			currentCapture: { ...record.value.capture },
 			currentStateTarget: { pid: record.value.target.pid, windowId: record.value.target.windowId, windowRef: record.value.target.windowRef },
+			currentFocusTarget: record.value.focusTarget ? { ...record.value.focusTarget } : undefined,
+			currentFocusRef: record.value.focusRef,
 			currentImageMode: record.value.imageMode,
 			currentLook: { ...record.value.look, outline: outline.root, parsedOutline: outline },
 			currentOutline: outline,
@@ -140,6 +147,8 @@ export class SavedStates {
 				outline: serializeOutline(state.currentOutline),
 				note: state.currentNote ? structuredClone(state.currentNote) : undefined,
 				imageMode: state.currentImageMode,
+				focusTarget: state.currentFocusTarget ? { ...state.currentFocusTarget } : undefined,
+				focusRef: state.currentFocusRef,
 			},
 		});
 	}

@@ -16,14 +16,35 @@ export type PreparedAction =
 
 export interface ActionState {
 	currentFocus: boolean;
+	focusRef?: string;
 }
 
 export interface ActionEnvironment {
 	headless: boolean;
 	image?: { width: number; height: number };
 	node(ref: string): OutlineNode;
+	nodeAtPoint?: (x: number, y: number, operation: UiAction["action"]) => OutlineNode | undefined;
 	center(node: OutlineNode): { x: number; y: number };
 	validatePoint(x: number, y: number, label?: string): void;
+}
+
+/** Select the most specific actionable outline node containing a point. */
+export function findNodeAtPoint(nodes: OutlineNode[], x: number, y: number, operation: Exclude<UiAction["action"], "wait">): OutlineNode | undefined {
+	const candidates = nodes.filter((node) => {
+		const rect = node.rect;
+		if (!rect || rect.w <= 0 || rect.h <= 0 || node.pictureOnly) return false;
+		if (x < rect.x || y < rect.y || x > rect.x + rect.w || y > rect.y + rect.h) return false;
+		if (operation === "setText" || operation === "typeText") return node.canSetValue || node.isTextInput || node.canFocus;
+		if (operation === "keypress") return node.canFocus || node.isTextInput || node.canSetValue;
+		if (operation === "click" || operation === "press") return node.canPress || node.canFocus || node.isTextInput;
+		return false;
+	});
+	return candidates.sort((a, b) => (a.rect!.w * a.rect!.h) - (b.rect!.w * b.rect!.h))[0];
+}
+
+export function needsVisualRefresh(actions: UiAction[], nodes: OutlineNode[], hasImage: boolean): boolean {
+	if (hasImage) return false;
+	return actions.some((action) => Number.isFinite(action.x) && Number.isFinite(action.y) && !findNodeAtPoint(nodes, action.x!, action.y!, action.action as Exclude<UiAction["action"], "wait">));
 }
 
 function mouseButton(value: unknown): MouseButtonName {
@@ -57,7 +78,7 @@ function nativeTarget(action: UiAction, operation: PreparedAction["action"], env
 	if (action.ref?.trim()) {
 		const node = env.node(action.ref.trim());
 		const semanticClick = operation === "click" || operation === "press";
-		if (semanticClick && node.isTextInput) {
+		if (semanticClick && node.isTextInput && env.image) {
 			const point = env.center(node);
 			env.validatePoint(point.x, point.y);
 			return point;
@@ -73,6 +94,11 @@ function nativeTarget(action: UiAction, operation: PreparedAction["action"], env
 	const x = toFiniteNumber(action.x, NaN);
 	const y = toFiniteNumber(action.y, NaN);
 	if (Number.isFinite(x) && Number.isFinite(y)) {
+		// Semantic accessibility geometry is a safe fallback when an outline-only
+		// observation omitted a screenshot. This keeps coordinate input useful
+		// without guessing a different window or replaying stale pixels.
+		const semanticNode = operation === "wait" ? undefined : env.nodeAtPoint?.(x, y, operation);
+		if (semanticNode?.wireRef && !semanticNode.pictureOnly) return nativeTarget({ ...action, ref: semanticNode.ref }, operation, env);
 		env.validatePoint(x, y);
 		return { x, y };
 	}
@@ -80,8 +106,10 @@ function nativeTarget(action: UiAction, operation: PreparedAction["action"], env
 	throw new Error(`${operation} requires either ref or both x and y.`);
 }
 
-function focusedTarget(env: ActionEnvironment): ActionTarget {
-	if (!env.image) throw new Error("Focused keyboard input requires an image-bearing state.");
+
+function focusedTarget(env: ActionEnvironment, state: ActionState): ActionTarget {
+	if (state.focusRef) return { ref: state.focusRef };
+	if (!env.image) throw new Error("Focused keyboard input requires an image-bearing state. Re-observe the active window or provide ref.");
 	return { focus: { x: Math.floor(env.image.width / 2), y: Math.floor(env.image.height / 2) } };
 }
 
@@ -93,8 +121,15 @@ function containsEditable(node: OutlineNode): boolean {
 export function prepareAction(action: UiAction, state: ActionState, env: ActionEnvironment): PreparedAction {
 	const operation = action.action;
 	const usesCurrentFocus = !env.headless && state.currentFocus && !action.ref && (operation === "typeText" || operation === "keypress");
-	const target = usesCurrentFocus ? focusedTarget(env) : nativeTarget(action, operation, env);
-	const establishesFocus = !env.headless && Boolean(action.ref) && (operation === "click" || operation === "press") && containsEditable(env.node(action.ref!));
+	const target = usesCurrentFocus ? focusedTarget(env, state) : nativeTarget(action, operation, env);
+	const targetRef = "ref" in target ? target.ref : undefined;
+	let establishesFocus = false;
+	if (!env.headless && (operation === "click" || operation === "press")) {
+		const focusRef = action.ref?.trim() || targetRef;
+		if (focusRef) {
+			try { establishesFocus = containsEditable(env.node(focusRef)); } catch { establishesFocus = false; }
+		}
+	}
 	const needsForeground = !env.headless && (operation === "click" || operation === "press") && "x" in target;
 
 	switch (operation) {

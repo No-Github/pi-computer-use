@@ -6,7 +6,7 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import type { AgentToolResult, AgentToolUpdateCallback, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { canRetryInForeground, outcomeAfterCheck, outcomeAfterObservedValues, prepareAction, type ActionState, type PreparedAction } from "./actions.ts";
+import { canRetryInForeground, findNodeAtPoint, needsVisualRefresh, outcomeAfterCheck, outcomeAfterObservedValues, prepareAction, type ActionState, type PreparedAction } from "./actions.ts";
 import { cdpClickForContext, cdpDragForContext, cdpEvaluateForContext, cdpKeypressForContext, cdpMouseForContext, cdpNavigateContext, cdpScrollForContext, cdpSnapshotForContext, cdpTabForWindow, cdpTypeFocusedForContext, cdpTypeForContext, disconnectCdp, listCdpPageContexts, type CdpConsoleEntry, type CdpPageSnapshot } from "./cdp.ts";
 import { getComputerUseConfig, isBrowserUseEnabled, isHeadlessMode, loadComputerUseConfig } from "./config.ts";
 import { noteAfterAct, noteFromLook, noteRegionKeyForRef, renderNote, type WindowNote } from "./note.ts";
@@ -82,6 +82,35 @@ interface ExecutionTrace {
 		gone?: boolean;
 		timeoutMs?: number;
 	};
+}
+
+interface RecoveryInstruction {
+	code: "stale_state" | "visual_observation_required" | "observation_required" | "root_changed";
+	retryWith: "observe_ui";
+	suppliedStateId?: string;
+	activeStateId?: string;
+	resourceKey?: string;
+}
+
+/**
+ * Tool transport retains the message, while code/recovery are available to
+ * hosts that preserve Error fields. Keep both forms so models can recover
+ * without interpreting platform-specific failure text.
+ */
+class ComputerUseRecoveryError extends Error {
+	readonly recovery: RecoveryInstruction;
+	readonly code: RecoveryInstruction["code"];
+
+	constructor(message: string, recovery: RecoveryInstruction) {
+		super(`${message}\nRecovery: ${JSON.stringify(recovery)}`);
+		this.name = "ComputerUseRecoveryError";
+		this.recovery = recovery;
+		this.code = recovery.code;
+	}
+}
+
+function recoveryError(message: string, recovery: RecoveryInstruction): ComputerUseRecoveryError {
+	return new ComputerUseRecoveryError(message, recovery);
 }
 
 interface ComputerUseDetails {
@@ -487,17 +516,23 @@ function outlineNodeCenter(node: OutlineNode): { x: number; y: number } {
 function validateStateId(stateId?: string): CurrentCapture {
 	const state = operationState();
 	if (!state.currentCapture) {
-		throw new Error("No observation state is available. Call observe_ui first.");
+		throw recoveryError("No observation state is available. Call observe_ui first.", { code: "observation_required", retryWith: "observe_ui" });
 	}
 	const supplied = stateId;
 	if (supplied && state.currentCapture.stateId !== supplied) {
-		throw new Error(
-			`Stale state '${supplied}'. The active operation state is '${state.currentCapture.stateId}'. Observe the root again and retry.`,
-		);
+		throw recoveryError(`Stale state '${supplied}'. The active operation state is '${state.currentCapture.stateId}'.`, {
+			code: "stale_state",
+			retryWith: "observe_ui",
+			suppliedStateId: supplied,
+			activeStateId: state.currentCapture.stateId,
+			resourceKey: state.resourceKey,
+		});
 	}
 	const stateTarget = state.currentStateTarget;
 	if (stateTarget && state.currentTarget && (stateTarget.pid !== state.currentTarget.pid || stateTarget.windowId !== state.currentTarget.windowId)) {
-		throw new Error("The latest state belongs to a different window. Call observe_ui for the target window and retry.");
+		throw recoveryError("The latest state belongs to a different window.", {
+			code: "root_changed", retryWith: "observe_ui", activeStateId: state.currentCapture.stateId, resourceKey: state.resourceKey,
+		});
 	}
 	return state.currentCapture;
 }
@@ -809,8 +844,14 @@ function nativeWindowRequest(target: Pick<CurrentTarget, "pid" | "windowId" | "n
 
 function setCurrentTarget(target: ResolvedTarget): void {
 	assertBrowserUseAllowed(target);
+	const state = operationState();
+	if (state.currentTarget && !sameRootIdentity(state.currentTarget, target)) {
+		// Focus is valid only for the root that received the pointer action.
+		state.currentFocusTarget = undefined;
+		state.currentFocusRef = undefined;
+	}
 	const windowRef = target.windowRef ?? storeWindowRefForTarget(target);
-	operationState().currentTarget = {
+	state.currentTarget = {
 		appName: target.appName,
 		bundleId: target.bundleId,
 		pid: target.pid,
@@ -1038,6 +1079,10 @@ async function captureCurrentTarget(signal?: AbortSignal, readText: "auto" | "al
 	state.currentStateTarget = { pid: target.pid, windowId: target.windowId, windowRef: target.windowRef };
 	state.currentLook = look;
 	state.currentOutline = outline;
+	if (state.currentFocusRef && !nodeByRef(outline, state.currentFocusRef)) {
+		state.currentFocusRef = undefined;
+		state.currentFocusTarget = undefined;
+	}
 	state.currentNote = noteFromLook(state.currentNote, outline, noteWindowForTarget(target, look));
 	state.resourceKey = desktopResourceKey(target);
 	state.epoch ??= resourceScheduler.epoch(state.resourceKey);
@@ -1146,7 +1191,10 @@ function currentLookOrThrow(): LookResponse {
 
 function ensurePointIsInLookImage(x: number, y: number, look: LookResponse, errorPrefix = "Coordinates"): void {
 	if (!look.image?.jpegBase64) {
-		throw new Error(`${errorPrefix} require an image-bearing root. This look is outline-only; use an @e ref with a semantic action or observe an image-bearing root.`);
+		throw recoveryError(`${errorPrefix} require an image-bearing root. This look is outline-only; use an @e ref with a semantic action or observe an image-bearing root.`, {
+			code: "visual_observation_required", retryWith: "observe_ui",
+			activeStateId: operationState().currentCapture?.stateId, resourceKey: operationState().resourceKey,
+		});
 	}
 	if (!Number.isFinite(x) || !Number.isFinite(y)) {
 		throw new Error(`${errorPrefix} must be finite numbers.`);
@@ -1819,6 +1867,7 @@ function prepareUiAction(action: UiAction, state: ActionState, look: LookRespons
 		headless,
 		image: look.image,
 		node: outlineNodeByRef,
+		nodeAtPoint: (x, y, operation) => findNodeAtPoint(operationState().currentOutline?.nodes ?? [], x, y, operation),
 		center: outlineNodeCenter,
 		validatePoint: (x, y, label) => ensurePointIsInLookImage(x, y, look, label),
 	});
@@ -1866,7 +1915,12 @@ function actionGrounding(actions: UiAction[], state: OperationState, target: Res
 			}
 			return { index, mode: "semantic" as const };
 		}
-		return { index, mode: "coordinate" as const };
+		const semanticNode = Number.isFinite(action.x) && Number.isFinite(action.y)
+			? findNodeAtPoint(outline.nodes, action.x!, action.y!, action.action)
+			: undefined;
+		return semanticNode?.wireRef && !semanticNode.pictureOnly
+			? { index, mode: "semantic" as const }
+			: { index, mode: "coordinate" as const };
 	});
 	return { stateId: capture.stateId, capturedAt: capture.timestamp, rootRef: target.windowRef, actions: grounded };
 }
@@ -1880,6 +1934,10 @@ async function dispatchUiAction(action: UiAction, target: ResolvedTarget, look: 
 	const trace = await helperAct(target, prepared, headless, signal);
 	if (!headless && (prepared.establishesFocus || (prepared.action === "click" && "x" in prepared.target))) {
 		state.currentFocus = true;
+		if ("ref" in prepared.target) state.focusRef = prepared.target.ref;
+		const operation = operationState();
+		operation.currentFocusTarget = { pid: target.pid, windowId: target.windowId, windowRef: target.windowRef };
+		operation.currentFocusRef = state.focusRef;
 	}
 	return trace;
 }
@@ -1889,7 +1947,8 @@ async function dispatchUiTransaction(actions: UiAction[], target: ResolvedTarget
 	// fallback is permitted, decide independently per action so a completed
 	// background prefix is never replayed as part of a foreground batch.
 	if (headless && currentPlatformBackend.actBatch) {
-		const actionState: ActionState = { currentFocus: false };
+		const operation = operationState();
+		const actionState: ActionState = { currentFocus: Boolean(operation.currentFocusTarget && operation.currentTarget && sameRootIdentity(operation.currentTarget, target)), focusRef: operation.currentFocusRef };
 		const requests = actions.map((action) => helperActRequest(target, prepareUiAction(action, actionState, look, true) as NativePreparedAction, "ax_only"));
 		const textLength = actions.reduce((sum, action) => sum + (action.text?.length ?? 0), 0);
 		const result = await currentPlatformBackend.actBatch(requests, { signal, timeoutMs: Math.max(COMMAND_TIMEOUT_MS, textLength * 25 + 6_000) });
@@ -1904,7 +1963,8 @@ async function dispatchUiTransaction(actions: UiAction[], target: ResolvedTarget
 		return execution;
 	}
 	const steps: ExecutionTrace[] = [];
-	const actionState: ActionState = { currentFocus: false };
+	const operation = operationState();
+	const actionState: ActionState = { currentFocus: Boolean(operation.currentFocusTarget && operation.currentTarget && sameRootIdentity(operation.currentTarget, target)), focusRef: operation.currentFocusRef };
 	for (const action of actions) {
 		const step = await dispatchUiAction(action, target, look, headless, actionState, signal);
 		steps.push(step);
@@ -1951,6 +2011,8 @@ function clearDesktopOperationState(state: OperationState): void {
 	state.currentLook = undefined;
 	state.currentOutline = undefined;
 	state.currentNote = undefined;
+	state.currentFocusTarget = undefined;
+	state.currentFocusRef = undefined;
 }
 
 async function terminalDesktopActionResult(
@@ -2053,11 +2115,21 @@ async function performDesktopTransaction(params: ActParams, actions: UiAction[],
 	const state = operationState();
 	state.currentImageMode = "auto";
 	validateStateId(params.stateId);
-	const look = currentLookOrThrow();
-	const baseView = { stateId: state.currentCapture!.stateId, outline: state.currentOutline! };
+	let look = currentLookOrThrow();
+	let baseView = { stateId: state.currentCapture!.stateId, outline: state.currentOutline! };
 	const condition = params.expect ? validateCondition(params.expect) : undefined;
 	const scopeNode = condition ? conditionScopeNode(look.parsedOutline!, condition) : undefined;
 	const target = await ensureTargetWindowId(await resolveCurrentTarget(signal), signal);
+	if (!look.image?.jpegBase64 && state.currentOutline) {
+		if (needsVisualRefresh(actions, state.currentOutline.nodes, Boolean(look.image?.jpegBase64))) {
+			// Refresh once before dispatching a coordinate action. This has no input
+			// side effects and deliberately never replays a partially delivered action.
+			const refreshed = (await resourceScheduler.readAt(state.resourceKey!, state.epoch ?? resourceScheduler.epoch(desktopResourceKey(target)), async () =>
+				await captureCurrentTarget(signal, "auto", AUTO_IMAGE_MAX_DIMENSION, target, true))).value;
+			look = refreshed.look;
+			baseView = { stateId: refreshed.capture.stateId, outline: refreshed.outline };
+		}
+	}
 	const noteBefore = state.currentNote;
 	const grounding = actionGrounding(actions, state, target);
 	let transaction = startActionTransaction(baseView.stateId, target.windowRef, desktopResourceKey(target), state.epoch ?? resourceScheduler.epoch(desktopResourceKey(target)));
@@ -2484,7 +2556,7 @@ async function executeTool<P, T>(ctx: ExtensionContext, params: P, signal: Abort
 	const requestedStateId = outputRef ? undefined : trimOrUndefined((params as { stateId?: string } | undefined)?.stateId);
 	const stateRecord = requestedStateId ? savedStates.get(requestedStateId) : undefined;
 	if (requestedStateId && !stateRecord) {
-		throw new Error(`State '${requestedStateId}' is unavailable or was evicted. Observe the root again.`);
+		throw recoveryError(`State '${requestedStateId}' is unavailable or was evicted.`, { code: "stale_state", retryWith: "observe_ui", suppliedStateId: requestedStateId });
 	}
 	const operation = savedStates.hydrate(stateRecord);
 	return await savedStates.operations.run(operation, async () => {
