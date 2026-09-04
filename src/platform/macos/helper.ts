@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import { constants as fsConstants } from "node:fs";
 import { access, mkdir, readFile, realpath } from "node:fs/promises";
 import net from "node:net";
@@ -85,6 +86,20 @@ async function packageVersion(): Promise<string | undefined> {
 	}
 }
 
+function bundledHelperExecutablePath(): string {
+	const arch = process.arch === "x64" ? "x64" : "arm64";
+	return path.join(PACKAGE_ROOT, "prebuilt", "macos", arch, "bridge");
+}
+
+async function fileHash(filePath: string): Promise<string | undefined> {
+	try {
+		const bytes = await readFile(filePath);
+		return createHash("sha256").update(bytes).digest("hex");
+	} catch {
+		return undefined;
+	}
+}
+
 async function installedHelperVersion(): Promise<string | undefined> {
 	try {
 		const info = await readFile(INSTALLED_INFO_PLIST_PATH, "utf8");
@@ -96,6 +111,10 @@ async function installedHelperVersion(): Promise<string | undefined> {
 
 export function helperVersionNeedsRefresh(expectedVersion: string | undefined, installedVersion: string | undefined): boolean {
 	return Boolean(expectedVersion && expectedVersion !== installedVersion);
+}
+
+export function helperBinaryNeedsRefresh(expectedHash: string | undefined, installedHash: string | undefined): boolean {
+	return Boolean(expectedHash && expectedHash !== installedHash);
 }
 
 export async function runProcess(
@@ -175,8 +194,13 @@ export class MacosHelperClient {
 		// agent process's hot path. Protocol compatibility is checked against the
 		// live daemon immediately afterwards.
 		if (await isExecutable(HELPER_APP_EXECUTABLE_PATH)) {
-			const [expectedVersion, currentVersion] = await Promise.all([packageVersion(), installedHelperVersion()]);
-			if (!helperVersionNeedsRefresh(expectedVersion, currentVersion)) return;
+			const [expectedVersion, currentVersion, expectedHash, installedHash] = await Promise.all([
+				packageVersion(),
+				installedHelperVersion(),
+				fileHash(bundledHelperExecutablePath()),
+				fileHash(HELPER_APP_EXECUTABLE_PATH),
+			]);
+			if (!helperVersionNeedsRefresh(expectedVersion, currentVersion) && !helperBinaryNeedsRefresh(expectedHash, installedHash)) return;
 			// Stop a daemon that still holds the old helper bundle before setup
 			// replaces and signs it. ensureDaemon() will launch the new binary.
 			await this.daemonCommand("shutdown", {}, 2_000, signal).catch(() => undefined);
