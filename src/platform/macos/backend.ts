@@ -82,17 +82,70 @@ export function buildMacosObserveArgs(request: PlatformObserveRequest): Record<s
 	};
 }
 
+function normalizedTitle(value: string | undefined): string {
+	return value?.trim().toLocaleLowerCase() ?? "";
+}
+
+function geometryScore(candidate: FramePoints, expected: FramePoints | undefined): number {
+	if (!expected || expected.w <= 1 || expected.h <= 1) return 0;
+	const difference = Math.abs(candidate.x - expected.x) + Math.abs(candidate.y - expected.y)
+		+ Math.abs(candidate.w - expected.w) + Math.abs(candidate.h - expected.h);
+	const normalizedDifference = difference / Math.max(1, expected.w + expected.h);
+	return normalizedDifference <= 0.02 ? 100 : normalizedDifference <= 0.1 ? 50 : 0;
+}
+
+export function selectMacosCaptureRoot(roots: PlatformRoot[], target: PlatformTarget): PlatformRoot | undefined {
+	const eligible = roots.filter((root) => root.pid === target.pid
+		&& Number.isFinite(root.windowId) && root.windowId! > 0
+		&& root.isOnscreen
+		&& root.framePoints.w > 1 && root.framePoints.h > 1);
+	const exactRef = eligible.filter((root) => target.rootRef && (root.rootRef === target.rootRef || root.windowRef === target.rootRef));
+	if (exactRef.length === 1) return exactRef[0];
+
+	const expectedTitle = normalizedTitle(target.windowTitle);
+	const ranked = eligible.map((root) => {
+		const title = normalizedTitle(root.title);
+		const titleScore = expectedTitle && title
+			? expectedTitle === title ? 100 : expectedTitle.includes(title) || title.includes(expectedTitle) ? 50 : 0
+			: 0;
+		return { root, score: titleScore + geometryScore(root.framePoints, target.framePoints) };
+	}).filter(({ score }) => score >= 100).sort((left, right) => right.score - left.score);
+	if (ranked.length === 0 || (ranked[1] && ranked[0].score < ranked[1].score + 25)) return undefined;
+	return ranked[0].root;
+}
+
 async function resolveImageCaptureTarget(request: PlatformObserveRequest, signal?: AbortSignal): Promise<PlatformObserveRequest> {
-	if (!request.includeImage || (request.target.windowId ?? 0) > 0 || !request.target.rootRef) return request;
+	if (!request.includeImage || ((request.target.windowId ?? 0) > 0 && request.target.isOnscreen !== false)) return request;
 
 	await macosHelper.command("focusWindow", { ...request.target }, { signal });
+	await new Promise<void>((resolve, reject) => {
+		const timer = setTimeout(resolve, 75);
+		if (!signal) return;
+		const onAbort = () => {
+			clearTimeout(timer);
+			reject(new DOMException("Visual target recovery was aborted.", "AbortError"));
+		};
+		signal.addEventListener("abort", onAbort, { once: true });
+	});
 	const roots = parseRoots(await macosHelper.command("listRoots", { pid: request.target.pid }, { signal }));
-	const refreshed = roots.find((root) =>
-		root.windowId && (root.rootRef === request.target.rootRef || root.windowRef === request.target.rootRef),
-	);
-	return refreshed?.windowId
-		? { ...request, target: { ...request.target, windowId: refreshed.windowId } }
-		: request;
+	const refreshed = selectMacosCaptureRoot(roots, request.target);
+	if (!refreshed?.windowId) {
+		throw new HelperCommandError(
+			"The selected root could not be paired with one unique visible macOS capture window after activation.",
+			"capture_target_unavailable",
+		);
+	}
+	return {
+		...request,
+		target: {
+			...request.target,
+			windowId: refreshed.windowId,
+			rootRef: refreshed.rootRef ?? refreshed.windowRef,
+			windowTitle: refreshed.title,
+			framePoints: refreshed.framePoints,
+			isOnscreen: refreshed.isOnscreen,
+		},
+	};
 }
 
 export const macosBackend: Pick<ComputerUsePlatformBackend, "listApps" | "listRoots" | "getFrontmost" | "focusWindow" | "observe" | "act" | "actBatch" | "readText" | "waitFor"> = {

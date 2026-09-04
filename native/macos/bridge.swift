@@ -3053,13 +3053,35 @@ final class Bridge {
 		var usedWindows = Set<ObjectIdentifier>()
 		var usedCandidateIds = Set<UInt32>()
 		for pair in pairs {
+			if pair.score < 0 { continue }
 			let key = ObjectIdentifier(pair.window)
 			if usedWindows.contains(key) || usedCandidateIds.contains(pair.candidate.windowId) { continue }
 			usedWindows.insert(key)
 			usedCandidateIds.insert(pair.candidate.windowId)
 			let frame = frameForWindow(pair.window)
 			let title = stringAttribute(pair.window, attribute: kAXTitleAttribute as CFString) ?? ""
-			output[key] = WindowPairing(candidate: pair.score >= 0 ? pair.candidate : nil, score: pair.score, confidence: pairingConfidence(frame: frame, title: title, candidate: pair.candidate, score: pair.score))
+			output[key] = WindowPairing(candidate: pair.candidate, score: pair.score, confidence: pairingConfidence(frame: frame, title: title, candidate: pair.candidate, score: pair.score))
+		}
+		let unmatchedWindows = windows.filter { !usedWindows.contains(ObjectIdentifier($0)) }
+		let unmatchedCandidates = candidates.filter { !usedCandidateIds.contains($0.windowId) && $0.isOnscreen }
+		if unmatchedWindows.count == 1, unmatchedCandidates.count == 1 {
+			let window = unmatchedWindows[0]
+			let candidate = unmatchedCandidates[0]
+			let frame = frameForWindow(window)
+			let title = stringAttribute(window, attribute: kAXTitleAttribute as CFString) ?? ""
+			let normalizedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+			let candidateTitle = candidate.title.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+			let titleMatches = !normalizedTitle.isEmpty && !candidateTitle.isEmpty
+				&& (normalizedTitle == candidateTitle || normalizedTitle.contains(candidateTitle) || candidateTitle.contains(normalizedTitle))
+			let widthTolerance = max(40, frame.width * 0.15)
+			let heightTolerance = max(40, frame.height * 0.15)
+			let sizeMatches = frame.width > 1 && frame.height > 1
+				&& abs(frame.width - candidate.bounds.width) <= widthTolerance
+				&& abs(frame.height - candidate.bounds.height) <= heightTolerance
+			if titleMatches || sizeMatches {
+				let score = windowPairScore(frame: frame, title: title, candidate: candidate)
+				output[ObjectIdentifier(window)] = WindowPairing(candidate: candidate, score: score, confidence: "low")
+			}
 		}
 		for window in windows {
 			let key = ObjectIdentifier(window)

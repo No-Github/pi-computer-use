@@ -15,8 +15,10 @@ import {
 	executeWaitFor,
 	reconstructStateFromBranch,
 	shutdownComputerUseSession,
+	toolResultFailureMessage,
 } from "../src/bridge.ts";
 import { getLoadedComputerUseConfig, loadComputerUseConfig } from "../src/config.ts";
+import { ActionRetryGuard } from "../src/action-retry-guard.ts";
 
 const stateId = Type.String({ description: "Required state id owning every @e ref used by this operation" });
 const point = { x: Type.Number(), y: Type.Number() };
@@ -193,6 +195,7 @@ function formatConfigStatus(): string {
 }
 
 export default function computerUseExtension(pi: ExtensionAPI): void {
+	const actionRetryGuard = new ActionRetryGuard();
 	for (const tool of [findTool, observeTool, searchUiTool, expandUiTool, inspectUiTool, actTool, readTextTool, waitForTool, launchBrowserTool, navigateBrowserTool, evaluateBrowserTool]) pi.registerTool(tool);
 
 	pi.registerCommand("computer-use", {
@@ -204,6 +207,7 @@ export default function computerUseExtension(pi: ExtensionAPI): void {
 	});
 
 	pi.on("session_start", async (_event, ctx) => {
+		actionRetryGuard.reset();
 		loadComputerUseConfig(ctx.cwd);
 		reconstructStateFromBranch(ctx);
 		if (!ctx.hasUI) return;
@@ -212,5 +216,21 @@ export default function computerUseExtension(pi: ExtensionAPI): void {
 
 	pi.on("session_shutdown", async () => {
 		await shutdownComputerUseSession();
+	});
+
+	pi.on("tool_call", (event) => {
+		const reason = actionRetryGuard.blockReason(event.toolName);
+		return reason ? { block: true, reason, terminate: true } : undefined;
+	});
+
+	pi.on("tool_result", (event) => {
+		actionRetryGuard.record(event.toolName, event.isError, event.details);
+		const failure = toolResultFailureMessage(event.toolName, { content: event.content, details: event.details });
+		if (!failure) return;
+		return {
+			content: [{ type: "text", text: failure }, ...event.content.filter((item) => item.type === "image")],
+			details: event.details,
+			isError: true,
+		};
 	});
 }

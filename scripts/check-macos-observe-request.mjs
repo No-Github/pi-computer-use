@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { buildMacosObserveArgs, macosBackend } from "../src/platform/macos/backend.ts";
+import { buildMacosObserveArgs, macosBackend, selectMacosCaptureRoot } from "../src/platform/macos/backend.ts";
 import { macosHelper } from "../src/platform/macos/helper.ts";
 
 const args = buildMacosObserveArgs({
@@ -11,6 +11,37 @@ const args = buildMacosObserveArgs({
 assert.equal(args.pid, 717, "observe must forward the resolved app PID");
 assert.equal(args.windowId, undefined, "invalid window IDs must remain omitted");
 assert.equal(args.windowRef, "@r8");
+
+const targetFrame = { x: 357, y: 30, w: 1830, h: 1316 };
+const captureRoot = (overrides = {}) => ({
+	pid: 717,
+	rootRef: "w24-new",
+	windowRef: "w24-new",
+	windowId: 103,
+	title: "Zed document",
+	framePoints: targetFrame,
+	isOnscreen: true,
+	...overrides,
+});
+
+assert.equal(
+	selectMacosCaptureRoot([captureRoot()], { pid: 717, rootRef: "w24", windowTitle: "Zed document", framePoints: targetFrame })?.windowId,
+	103,
+	"a uniquely matching visible window may recover after its native root ref changes",
+);
+assert.equal(
+	selectMacosCaptureRoot([captureRoot({ isOnscreen: false })], { pid: 717, rootRef: "w24", windowTitle: "Zed document", framePoints: targetFrame }),
+	undefined,
+	"an offscreen candidate must not establish visual grounding",
+);
+assert.equal(
+	selectMacosCaptureRoot([
+		captureRoot({ rootRef: "a", windowId: 103 }),
+		captureRoot({ rootRef: "b", windowId: 104 }),
+	], { pid: 717, rootRef: "w24", windowTitle: "Zed document", framePoints: targetFrame }),
+	undefined,
+	"equally plausible candidates must remain ambiguous",
+);
 
 const originalCommand = macosHelper.command;
 const commands = [];

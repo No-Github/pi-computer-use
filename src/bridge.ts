@@ -13,10 +13,11 @@ import { noteAfterAct, noteFromLook, noteRegionKeyForRef, renderNote, type Windo
 import { foldToBudget, graftScopedOutline, nodeByRef, outlineNodeLabel, outlineNodePath, rankedTextMatch, restoreOutline, searchOutline, searchOutlineRanked, serializeOutline, serializeOutlineNodeShallow, serializeOutlineSearchMatch, type LookResponse, type Outline, type OutlineChange, type OutlineNode, type OutlineSearchMatch, type SerializedOutline, type SerializedOutlineNode, type SerializedOutlineSearchMatch } from "./outline.ts";
 import { applyOutputEnvelope, boundToolError, clearStoredOutputs, readStoredOutput, UI_TEXT_PAGE_CHARS } from "./output.ts";
 import { assessActionEffect } from "./action-effect.ts";
+import { actionOutcomeForTrace, actionOutcomeFromExecution, type ActionOutcome } from "./action-outcome.ts";
 import { AGENT_TOOL_NAMES, type ActParams, type EvaluateBrowserParams, type ExpandUiParams, type ImageMode, type InspectUiParams, type LaunchBrowserParams, type FindParams, type NavigateBrowserParams, type ObserveParams, type ObserveTargetParams, type ReadTextParams, type RootSelector, type SearchUiParams, type UiAction, type VisualTargetReference, type WaitForParams } from "./contract.ts";
 import { toFiniteNumber } from "./platform/coerce.ts";
 import { currentPlatformBackend } from "./platform/index.ts";
-import type { FramePoints, HelperActPerformed, HelperActResult, NativeInputDelivery, PlatformActRequest, PlatformApp as HelperApp, PlatformDiagnostics, PlatformFrontmostResult as FrontmostResult, PlatformRoot as HelperWindow } from "./platform/types.ts";
+import type { FramePoints, HelperActPerformed, HelperActResult, NativeInputDelivery, PlatformActRequest, PlatformApp as HelperApp, PlatformDiagnostics, PlatformFrontmostResult as FrontmostResult, PlatformRoot as HelperWindow, PlatformTarget } from "./platform/types.ts";
 import type { PermissionStatus } from "./permissions.ts";
 import { ResourceScheduler } from "./runtime.ts";
 import { resolveRootReference, rootIdentityKey, rootResolutionError, updateRootReference, type RootReference } from "./root-lifecycle.ts";
@@ -142,6 +143,7 @@ interface ComputerUseDetails {
 	note?: WindowNote;
 	activation: ActivationFlags;
 	execution: ExecutionTrace;
+	actionOutcome?: ActionOutcome;
 	config?: {
 		browser_use: boolean;
 		headless: boolean;
@@ -167,7 +169,7 @@ interface ComputerUseDetails {
 }
 interface TerminalDesktopActionDetails {
 	tool: "act_ui";
-	status: "target_closed" | "post_action_observation_failed" | "postcondition_failed";
+	status: "preflight_failed" | "target_closed" | "post_action_observation_failed" | "postcondition_failed";
 	baseStateId: string;
 	target: {
 		app: string;
@@ -179,6 +181,7 @@ interface TerminalDesktopActionDetails {
 		nativeWindowRef?: string;
 	};
 	execution: ExecutionTrace;
+	actionOutcome: ActionOutcome;
 	error: { code: string; message: string };
 }
 
@@ -243,6 +246,7 @@ export function toolResultFailureMessage(tool: string, result: AgentToolResult<u
 	if (tool !== "act_ui") return undefined;
 	const details = result.details as {
 		status?: unknown;
+		actionOutcome?: ActionOutcome;
 		execution?: {
 			outcome?: unknown;
 			error?: { message?: unknown };
@@ -251,6 +255,13 @@ export function toolResultFailureMessage(tool: string, result: AgentToolResult<u
 		error?: { message?: unknown };
 	} | undefined;
 	const execution = details?.execution;
+	if (details?.actionOutcome?.status === "verified") return undefined;
+	if (details?.actionOutcome?.status === "not_dispatched") {
+		return `act_ui was not dispatched: zero UI actions were executed (${details.actionOutcome.reason}). Do not claim the action completed; obtain a usable observation or ask the user to take over.`;
+	}
+	if (details?.actionOutcome?.status === "dispatched_unverified") {
+		return `act_ui is unverified: ${details.actionOutcome.dispatchedActions} UI actions were dispatched but not verified (${details.actionOutcome.reason}). Do not claim completion or replay the action without observing the current UI.`;
+	}
 	const failureMessage = typeof execution?.error?.message === "string"
 		? execution.error.message
 		: typeof details?.error?.message === "string"
@@ -272,6 +283,19 @@ export function toolResultFailureMessage(tool: string, result: AgentToolResult<u
 		return "act_ui uncertain: the successor UI did not verify an observable effect. Do not claim completion; inspect the successor UI before retrying.";
 	}
 	return undefined;
+}
+
+function actionOutcomeForExecutionTrace(execution: ExecutionTrace): ActionOutcome {
+	const verificationEvidence = execution.verification?.evidence;
+	const source = verificationEvidence && typeof verificationEvidence === "object"
+		? (verificationEvidence as { source?: "postcondition" | "successor_state" | "helper_evidence" | "none" }).source
+		: undefined;
+	return actionOutcomeForTrace({
+		outcome: execution.outcome,
+		actionCount: execution.actionCount,
+		steps: execution.steps,
+		verification: execution.verification ? { status: execution.verification.status, source } : undefined,
+	});
 }
 
 interface EvaluateBrowserDetails {
@@ -878,8 +902,15 @@ function toResolvedTarget(app: HelperApp, window: HelperWindow): ResolvedTarget 
 	return { ...baseTarget, windowRef: storeWindowRefForAppWindow(app, window).ref };
 }
 
-function nativeWindowRequest(target: Pick<CurrentTarget, "pid" | "windowId" | "nativeWindowRef">): { pid: number; windowId: number; windowRef?: string } {
-	return { pid: target.pid, windowId: target.windowId, windowRef: target.nativeWindowRef };
+function nativeWindowRequest(target: ResolvedTarget): PlatformTarget {
+	return {
+		pid: target.pid,
+		windowId: target.windowId,
+		rootRef: target.nativeWindowRef,
+		windowTitle: target.windowTitle,
+		framePoints: target.framePoints,
+		isOnscreen: target.isOnscreen,
+	};
 }
 
 function setCurrentTarget(target: ResolvedTarget): void {
@@ -1109,6 +1140,16 @@ async function captureCurrentTarget(signal?: AbortSignal, readText: "auto" | "al
 	let target = targetOverride ?? await resolveCurrentTarget(signal);
 	target = await ensureTargetWindowId(target, signal);
 	const look = await performLook(target, { maxDimension, readText, includeImage }, signal);
+	if (look.window.windowId > 0) {
+		target = {
+			...target,
+			windowId: look.window.windowId,
+			nativeWindowRef: look.window.rootRef ?? target.nativeWindowRef,
+			framePoints: look.window.framePoints,
+			scaleFactor: look.window.scaleFactor,
+			isOnscreen: Boolean(look.image?.jpegBase64) || target.isOnscreen,
+		};
+	}
 	const outline = stabilizeRefs(baseTarget && sameRootIdentity(baseTarget, target) ? baseOutline : undefined, look.parsedOutline!);
 	look.parsedOutline = outline;
 	look.outline = outline.root;
@@ -1181,6 +1222,7 @@ async function buildToolResult(
 		note: state.currentNote,
 		activation: result.activation,
 		execution,
+		actionOutcome: tool === "act_ui" ? actionOutcomeForExecutionTrace(execution) : undefined,
 		status: "ok",
 		config: getComputerUseConfig(),
 		helper: runtimeState.helperDiagnostics,
@@ -2124,6 +2166,13 @@ async function terminalDesktopActionResult(
 	const code = targetClosed ? "target_closed" : postconditionFailed ? "postcondition_failed" : "post_action_observation_failed";
 	const message = error instanceof Error ? error.message : String(error);
 	clearDesktopOperationState(operationState());
+	const tracedOutcome = actionOutcomeForExecutionTrace(execution);
+	const actionOutcome: ActionOutcome = tracedOutcome.status === "dispatched_unverified"
+		? {
+			...tracedOutcome,
+			reason: postconditionFailed ? "postcondition_failed" : targetClosed ? "target_unavailable" : "post_action_observation_failed",
+		}
+		: tracedOutcome;
 	const details: TerminalDesktopActionDetails = {
 		tool: "act_ui",
 		status,
@@ -2138,6 +2187,7 @@ async function terminalDesktopActionResult(
 			nativeWindowRef: target.nativeWindowRef,
 		},
 		execution,
+		actionOutcome,
 		error: { code, message },
 	};
 	const result = targetClosed
@@ -2151,6 +2201,45 @@ async function terminalDesktopActionResult(
 	};
 }
 
+function preflightDesktopActionResult(
+	target: ResolvedTarget,
+	baseStateId: string,
+	error: unknown,
+	transaction: ActionTransactionContext,
+): AgentToolResult<TerminalDesktopActionDetails> {
+	const message = error instanceof Error ? error.message : String(error);
+	const errorCode = typeof error === "object" && error !== null && "code" in error && typeof error.code === "string"
+		? error.code
+		: "preflight_failed";
+	const reason = errorCode === "capture_unavailable" || errorCode === "capture_target_unavailable"
+		? "visual_observation_unavailable"
+		: "target_unavailable";
+	const terminalTransaction = transaction.phase === "terminal" ? transaction : transitionActionTransaction(transaction, "terminal");
+	return {
+		content: [{
+			type: "text",
+			text: `No UI actions were executed. The required pre-action observation was unavailable: ${message}\nCall observe_ui again after making the target window visible, or ask the user to take over.`,
+		}],
+		details: {
+			tool: "act_ui",
+			status: "preflight_failed",
+			baseStateId,
+			target: {
+				app: target.appName,
+				bundleId: target.bundleId,
+				pid: target.pid,
+				windowTitle: target.windowTitle,
+				windowId: target.windowId,
+				windowRef: target.windowRef,
+				nativeWindowRef: target.nativeWindowRef,
+			},
+			execution: executionTrace("act", "default", { outcome: "didnt", actionCount: 0, transaction: terminalTransaction }),
+			actionOutcome: actionOutcomeFromExecution({ stage: "preflight", reason }),
+			error: { code: errorCode, message },
+		},
+	};
+}
+
 async function performDesktopTransaction(params: ActParams, actions: UiAction[], signal?: AbortSignal): Promise<AgentToolResult<ComputerUseDetails | TerminalDesktopActionDetails>> {
 	const state = operationState();
 	state.currentImageMode = "auto";
@@ -2160,19 +2249,26 @@ async function performDesktopTransaction(params: ActParams, actions: UiAction[],
 	const condition = params.expect ? validateCondition(params.expect) : undefined;
 	const scopeNode = condition ? conditionScopeNode(look.parsedOutline!, condition) : undefined;
 	const target = await ensureTargetWindowId(await resolveCurrentTarget(signal), signal);
+	let transaction = startActionTransaction(baseView.stateId, target.windowRef, desktopResourceKey(target), state.epoch ?? resourceScheduler.epoch(desktopResourceKey(target)));
 	if (!look.image?.jpegBase64 && state.currentOutline) {
 		if (needsVisualRefresh(actions, state.currentOutline.nodes, Boolean(look.image?.jpegBase64))) {
 			// Refresh once before dispatching a coordinate action. This has no input
 			// side effects and deliberately never replays a partially delivered action.
-			const refreshed = (await resourceScheduler.readAt(state.resourceKey!, state.epoch ?? resourceScheduler.epoch(desktopResourceKey(target)), async () =>
-				await captureCurrentTarget(signal, "auto", AUTO_IMAGE_MAX_DIMENSION, target, true))).value;
+			let refreshed: CaptureResult;
+			try {
+				refreshed = (await resourceScheduler.readAt(state.resourceKey!, state.epoch ?? resourceScheduler.epoch(desktopResourceKey(target)), async () =>
+					await captureCurrentTarget(signal, "auto", AUTO_IMAGE_MAX_DIMENSION, target, true))).value;
+			} catch (error) {
+				if (signal?.aborted) throw error;
+				return preflightDesktopActionResult(target, baseView.stateId, error, transaction);
+			}
 			look = refreshed.look;
 			baseView = { stateId: refreshed.capture.stateId, outline: refreshed.outline };
+			transaction = startActionTransaction(baseView.stateId, target.windowRef, desktopResourceKey(target), state.epoch ?? resourceScheduler.epoch(desktopResourceKey(target)));
 		}
 	}
 	const noteBefore = state.currentNote;
 	const grounding = actionGrounding(actions, state, target);
-	let transaction = startActionTransaction(baseView.stateId, target.windowRef, desktopResourceKey(target), state.epoch ?? resourceScheduler.epoch(desktopResourceKey(target)));
 	return await withWindowWriteLock(target, async () => {
 		const headless = getComputerUseConfig().headless;
 		transaction = transitionActionTransaction(transaction, "executing");
@@ -2617,10 +2713,7 @@ function makeToolExecutor<P, D>(tool: string, perform: (params: P, signal?: Abor
 		ctx: ExtensionContext,
 	): Promise<AgentToolResult<D>> => {
 		try {
-			const result = applyOutputEnvelope(tool, await executeTool(ctx, params, signal, () => perform(params, signal)));
-			const failure = toolResultFailureMessage(tool, result as AgentToolResult<unknown>);
-			if (failure) throw new Error(failure);
-			return result;
+			return applyOutputEnvelope(tool, await executeTool(ctx, params, signal, () => perform(params, signal)));
 		} catch (error) {
 			throw boundToolError(tool, error);
 		}

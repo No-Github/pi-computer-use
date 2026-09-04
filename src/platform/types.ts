@@ -134,6 +134,9 @@ export interface PlatformTarget {
 	pid?: number;
 	windowId?: number;
 	rootRef?: string;
+	windowTitle?: string;
+	framePoints?: FramePoints;
+	isOnscreen?: boolean;
 }
 
 export interface PlatformObserveRequest {
