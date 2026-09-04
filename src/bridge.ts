@@ -234,6 +234,46 @@ interface BrowserObservationDetails {
 	execution?: ExecutionTrace;
 }
 
+/**
+ * The pi tool executor marks a result as an error only when the tool throws.
+ * Keep this check at the extension boundary so a helper's explicit delivery
+ * failure cannot be mistaken for a successful tool call by the model.
+ */
+export function toolResultFailureMessage(tool: string, result: AgentToolResult<unknown>): string | undefined {
+	if (tool !== "act_ui") return undefined;
+	const details = result.details as {
+		status?: unknown;
+		execution?: {
+			outcome?: unknown;
+			error?: { message?: unknown };
+			verification?: { status?: unknown };
+		};
+		error?: { message?: unknown };
+	} | undefined;
+	const execution = details?.execution;
+	const failureMessage = typeof execution?.error?.message === "string"
+		? execution.error.message
+		: typeof details?.error?.message === "string"
+			? details.error.message
+			: undefined;
+	if (execution?.outcome === "didnt") {
+		return `act_ui failed: the requested input was not delivered${failureMessage ? `: ${failureMessage}` : "."} Do not claim the action completed; observe the current UI and retry only when safe.`;
+	}
+	if (execution?.outcome === "unknown") {
+		return `act_ui uncertain: the helper could not confirm delivery${failureMessage ? `: ${failureMessage}` : "."} Do not claim the action completed; inspect the successor UI before deciding whether a retry is safe.`;
+	}
+	if (failureMessage || (typeof details?.status === "string" && details.status !== "ok")) {
+		return `act_ui failed after dispatch${failureMessage ? `: ${failureMessage}` : "."} Do not claim the action completed; inspect the current UI before continuing.`;
+	}
+	if (execution?.verification?.status === "failed") {
+		return "act_ui failed: the requested postcondition was not satisfied. Do not claim completion; inspect the successor UI state.";
+	}
+	if (execution?.verification?.status === "not_verified") {
+		return "act_ui uncertain: the successor UI did not verify an observable effect. Do not claim completion; inspect the successor UI before retrying.";
+	}
+	return undefined;
+}
+
 interface EvaluateBrowserDetails {
 	tool: "evaluate_browser";
 	baseStateId: string;
@@ -2577,7 +2617,10 @@ function makeToolExecutor<P, D>(tool: string, perform: (params: P, signal?: Abor
 		ctx: ExtensionContext,
 	): Promise<AgentToolResult<D>> => {
 		try {
-			return applyOutputEnvelope(tool, await executeTool(ctx, params, signal, () => perform(params, signal)));
+			const result = applyOutputEnvelope(tool, await executeTool(ctx, params, signal, () => perform(params, signal)));
+			const failure = toolResultFailureMessage(tool, result as AgentToolResult<unknown>);
+			if (failure) throw new Error(failure);
+			return result;
 		} catch (error) {
 			throw boundToolError(tool, error);
 		}

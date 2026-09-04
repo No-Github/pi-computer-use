@@ -8,16 +8,17 @@ import { countOutlineNodes, foldToBudget, graftScopedOutline, nodeByRef, parseLo
 import { shouldPreferForegroundModalWindow } from "../src/root-selection.ts";
 
 const root = path.resolve(new URL("..", import.meta.url).pathname);
-const swift = fs.readFileSync(path.join(root, "native/macos/bridge.swift"), "utf8");
-const agentCursorSwift = fs.readFileSync(path.join(root, "native/macos/agent_cursor.swift"), "utf8");
-const ts = fs.readFileSync(path.join(root, "src/bridge.ts"), "utf8");
-const noteTs = fs.readFileSync(path.join(root, "src/note.ts"), "utf8");
-const configTs = fs.readFileSync(path.join(root, "src/config.ts"), "utf8");
-const setupHelper = fs.readFileSync(path.join(root, "scripts/setup-helper.mjs"), "utf8");
-const macosHelperPath = fs.readFileSync(path.join(root, "src/platform/macos/helper-path.mjs"), "utf8");
+const readText = (filePath) => fs.readFileSync(filePath, "utf8").replace(/\r\n/g, "\n");
+const swift = readText(path.join(root, "native/macos/bridge.swift"));
+const agentCursorSwift = readText(path.join(root, "native/macos/agent_cursor.swift"));
+const ts = readText(path.join(root, "src/bridge.ts"));
+const noteTs = readText(path.join(root, "src/note.ts"));
+const configTs = readText(path.join(root, "src/config.ts"));
+const setupHelper = readText(path.join(root, "scripts/setup-helper.mjs"));
+const macosHelperPath = readText(path.join(root, "src/platform/macos/helper-path.mjs"));
 const srcFiles = fs.readdirSync(path.join(root, "src"), { recursive: true })
 	.filter((file) => typeof file === "string" && file.endsWith(".ts"))
-	.map((file) => [file, fs.readFileSync(path.join(root, "src", file), "utf8")]);
+	.map((file) => [file, readText(path.join(root, "src", file))]);
 const results = [];
 
 function check(name, fn) {
