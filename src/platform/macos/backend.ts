@@ -2,7 +2,7 @@ import { getComputerUseConfig } from "../../config.ts";
 import { parseLookResponse, type LookResponse } from "../../outline.ts";
 import { toBoolean, toFiniteNumber, toOptionalString } from "../coerce.ts";
 import type { ComputerUsePlatformBackend, FramePoints, HelperActResult, PlatformActRequest, PlatformApp, PlatformFocusWindowResult, PlatformFrontmostResult, PlatformObserveRequest, PlatformReadTextRequest, PlatformReadTextResponse, PlatformRoot, PlatformRootKind, PlatformRootQuery, PlatformTarget, PlatformWaitForRequest, PlatformWaitForResponse } from "../types.ts";
-import { macosHelper } from "./helper.ts";
+import { HelperCommandError, macosHelper } from "./helper.ts";
 
 function parseApps(result: unknown): PlatformApp[] {
 	const array = Array.isArray(result) ? result : (result as any)?.apps;
@@ -82,6 +82,19 @@ export function buildMacosObserveArgs(request: PlatformObserveRequest): Record<s
 	};
 }
 
+async function resolveImageCaptureTarget(request: PlatformObserveRequest, signal?: AbortSignal): Promise<PlatformObserveRequest> {
+	if (!request.includeImage || (request.target.windowId ?? 0) > 0 || !request.target.rootRef) return request;
+
+	await macosHelper.command("focusWindow", { ...request.target }, { signal });
+	const roots = parseRoots(await macosHelper.command("listRoots", { pid: request.target.pid }, { signal }));
+	const refreshed = roots.find((root) =>
+		root.windowId && (root.rootRef === request.target.rootRef || root.windowRef === request.target.rootRef),
+	);
+	return refreshed?.windowId
+		? { ...request, target: { ...request.target, windowId: refreshed.windowId } }
+		: request;
+}
+
 export const macosBackend: Pick<ComputerUsePlatformBackend, "listApps" | "listRoots" | "getFrontmost" | "focusWindow" | "observe" | "act" | "actBatch" | "readText" | "waitFor"> = {
 	async listApps(signal?: AbortSignal): Promise<PlatformApp[]> {
 		return parseApps(await macosHelper.command<unknown>("listApps", {}, { signal }));
@@ -114,7 +127,15 @@ export const macosBackend: Pick<ComputerUsePlatformBackend, "listApps" | "listRo
 	},
 
 	async observe(request: PlatformObserveRequest, options?: { timeoutMs?: number; signal?: AbortSignal }): Promise<LookResponse> {
-		return parseLookResponse(await macosHelper.command("look", buildMacosObserveArgs(request), options));
+		const resolved = await resolveImageCaptureTarget(request, options?.signal);
+		const look = parseLookResponse(await macosHelper.command("look", buildMacosObserveArgs(resolved), options));
+		if (resolved.includeImage && !look.image?.jpegBase64) {
+			throw new HelperCommandError(
+				"Visual observation did not return an image. The selected window may be on another macOS Space or unavailable to ScreenCaptureKit.",
+				"capture_unavailable",
+			);
+		}
+		return look;
 	},
 
 	async act(request: PlatformActRequest, options?: { timeoutMs?: number; signal?: AbortSignal }): Promise<HelperActResult> {

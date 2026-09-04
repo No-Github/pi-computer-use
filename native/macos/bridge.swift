@@ -1097,21 +1097,28 @@ final class Bridge {
 		}
 
 		let appElement = AXUIElementCreateApplication(pid)
+		let app = NSRunningApplication(processIdentifier: pid)
+		let appIsFrontmost = NSWorkspace.shared.frontmostApplication?.processIdentifier == pid
 		if let focusedWindow = copyAttribute(appElement, attribute: kAXFocusedWindowAttribute as CFString).flatMap(asAXElement),
-			sameElement(focusedWindow, window)
+			sameElement(focusedWindow, window),
+			appIsFrontmost
 		{
 			return ["focused": true, "alreadyFocused": true]
 		}
 
+		let activated = appIsFrontmost ? false : (app?.activate() ?? false)
 		let setMainStatus = AXUIElementSetAttributeValue(window, kAXMainAttribute as CFString, kCFBooleanTrue)
 		let setFocusedStatus = AXUIElementSetAttributeValue(window, kAXFocusedAttribute as CFString, kCFBooleanTrue)
 		let raiseStatus = AXUIElementPerformAction(window, kAXRaiseAction as CFString)
-		let focused = setMainStatus == .success || setFocusedStatus == .success || raiseStatus == .success
+		let raised = raiseStatus == .success
+		let focused = activated || setMainStatus == .success || setFocusedStatus == .success || raised
+		if focused { usleep(150_000) }
 		var result: [String: Any] = [
 			"focused": focused,
+			"activated": activated,
 			"setMain": setMainStatus == .success,
 			"setFocused": setFocusedStatus == .success,
-			"raised": raiseStatus == .success,
+			"raised": raised,
 		]
 		if !focused {
 			result["reason"] = "focus_failed"
@@ -1269,7 +1276,7 @@ final class Bridge {
 				],
 				"scaleFactor": scale,
 				"isMinimized": isMinimized,
-				"isOnscreen": candidate?.isOnscreen ?? !isMinimized,
+				"isOnscreen": candidate?.isOnscreen ?? false,
 				"isMain": isMain,
 				"isFocused": isFocused,
 				"metadata": rootMetadata(pairing: pairing, sheetCount: sheetCount),
@@ -2940,7 +2947,7 @@ final class Bridge {
 			}
 
 			let title = (entry[kCGWindowName as String] as? String) ?? ""
-			let isOnscreen = (entry[kCGWindowIsOnscreen as String] as? NSNumber)?.boolValue ?? true
+			let isOnscreen = (entry[kCGWindowIsOnscreen as String] as? NSNumber)?.boolValue ?? false
 			candidates.append(
 				CGWindowCandidate(
 					windowId: windowNumber,

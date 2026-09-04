@@ -90,6 +90,8 @@ export interface PlatformFrontmostResult {
 export interface PlatformFocusWindowResult {
 	focused: boolean;
 	alreadyFocused?: boolean;
+	activated?: boolean;
+	raised?: boolean;
 	reason?: string;
 }
 
