@@ -25,6 +25,7 @@ const PACKAGE_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), 
 const SETUP_HELPER_SCRIPT = path.join(PACKAGE_ROOT, "scripts", "setup-helper.mjs");
 const PACKAGE_JSON_PATH = path.join(PACKAGE_ROOT, "package.json");
 const INSTALLED_INFO_PLIST_PATH = path.join(HELPER_APP_PATH, "Contents", "Info.plist");
+const INSTALLED_SOURCE_HASH_PATH = path.join(HELPER_APP_PATH, "Contents", "Resources", "source.sha256");
 
 export class HelperTransportError extends Error {
 	constructor(message: string) {
@@ -91,6 +92,11 @@ function bundledHelperExecutablePath(): string {
 	return path.join(PACKAGE_ROOT, "prebuilt", "macos", arch, "bridge");
 }
 
+function bundledHelperAppPaths(): string[] {
+	const arch = process.arch === "x64" ? "x64" : "arm64";
+	return ["universal", arch].map((candidate) => path.join(PACKAGE_ROOT, "prebuilt", "macos", candidate, "pi-computer-use.app"));
+}
+
 async function fileHash(filePath: string): Promise<string | undefined> {
 	try {
 		const bytes = await readFile(filePath);
@@ -98,6 +104,38 @@ async function fileHash(filePath: string): Promise<string | undefined> {
 	} catch {
 		return undefined;
 	}
+}
+
+async function textValue(filePath: string): Promise<string | undefined> {
+	return await readFile(filePath, "utf8").then((value) => value.trim() || undefined).catch(() => undefined);
+}
+
+export function selectHelperSourceHash(
+	sourceMarkerHash: string | undefined,
+	signedAppExecutableHash: string | undefined,
+	looseExecutableHash: string | undefined,
+): string | undefined {
+	return sourceMarkerHash ?? signedAppExecutableHash ?? looseExecutableHash;
+}
+
+async function bundledHelperSourceHash(): Promise<string | undefined> {
+	for (const appPath of bundledHelperAppPaths()) {
+		const [sourceMarkerHash, signedAppExecutableHash] = await Promise.all([
+			textValue(path.join(appPath, "Contents", "Resources", "source.sha256")),
+			fileHash(path.join(appPath, "Contents", "MacOS", "bridge")),
+		]);
+		const sourceHash = selectHelperSourceHash(sourceMarkerHash, signedAppExecutableHash, undefined);
+		if (sourceHash) return sourceHash;
+	}
+	return fileHash(bundledHelperExecutablePath());
+}
+
+async function installedHelperSourceHash(): Promise<string | undefined> {
+	return selectHelperSourceHash(
+		await textValue(INSTALLED_SOURCE_HASH_PATH),
+		await fileHash(HELPER_APP_EXECUTABLE_PATH),
+		undefined,
+	);
 }
 
 async function installedHelperVersion(): Promise<string | undefined> {
@@ -115,6 +153,16 @@ export function helperVersionNeedsRefresh(expectedVersion: string | undefined, i
 
 export function helperBinaryNeedsRefresh(expectedHash: string | undefined, installedHash: string | undefined): boolean {
 	return Boolean(expectedHash && expectedHash !== installedHash);
+}
+
+export function helperInstallNeedsRefresh(status: {
+	expectedVersion: string | undefined;
+	installedVersion: string | undefined;
+	expectedSourceHash: string | undefined;
+	installedSourceHash: string | undefined;
+}): boolean {
+	return helperVersionNeedsRefresh(status.expectedVersion, status.installedVersion)
+		|| helperBinaryNeedsRefresh(status.expectedSourceHash, status.installedSourceHash);
 }
 
 export async function runProcess(
@@ -179,13 +227,49 @@ export async function runProcess(
 	});
 }
 
+export type MacosHelperInstallationDependencies = {
+	isExecutable: () => Promise<boolean>;
+	packageVersion: () => Promise<string | undefined>;
+	installedHelperVersion: () => Promise<string | undefined>;
+	bundledHelperSourceHash: () => Promise<string | undefined>;
+	installedHelperSourceHash: () => Promise<string | undefined>;
+	runSetup: (signal?: AbortSignal) => Promise<void>;
+	wait: (ms: number, signal?: AbortSignal) => Promise<void>;
+};
+
+function defaultInstallationDependencies(): MacosHelperInstallationDependencies {
+	return {
+		isExecutable: () => isExecutable(HELPER_APP_EXECUTABLE_PATH),
+		packageVersion,
+		installedHelperVersion,
+		bundledHelperSourceHash,
+		installedHelperSourceHash,
+		runSetup: (signal) => runProcess(process.execPath, [SETUP_HELPER_SCRIPT, "--runtime"], HELPER_SETUP_TIMEOUT_MS, signal, {
+			...process.env,
+			ELECTRON_RUN_AS_NODE: "1",
+			BUN_BE_BUN: "1",
+		}),
+		wait: sleep,
+	};
+}
+
 export class MacosHelperClient {
 	private daemonAvailable = false;
 	private requestSequence = 0;
 	private diagnosticsCache?: PlatformDiagnostics;
+	private readonly installation: MacosHelperInstallationDependencies;
+
+	constructor(installation: Partial<MacosHelperInstallationDependencies> = {}) {
+		this.installation = { ...defaultInstallationDependencies(), ...installation };
+	}
 
 	get diagnostics(): PlatformDiagnostics | undefined {
 		return this.diagnosticsCache;
+	}
+
+	private invalidateDaemon(): void {
+		this.daemonAvailable = false;
+		this.diagnosticsCache = undefined;
 	}
 
 	async ensureInstalled(signal?: AbortSignal): Promise<void> {
@@ -193,28 +277,25 @@ export class MacosHelperClient {
 		// Installation is a deployment/repair operation, not part of every new
 		// agent process's hot path. Protocol compatibility is checked against the
 		// live daemon immediately afterwards.
-		if (await isExecutable(HELPER_APP_EXECUTABLE_PATH)) {
-			const [expectedVersion, currentVersion, expectedHash, installedHash] = await Promise.all([
-				packageVersion(),
-				installedHelperVersion(),
-				fileHash(bundledHelperExecutablePath()),
-				fileHash(HELPER_APP_EXECUTABLE_PATH),
+		if (await this.installation.isExecutable()) {
+			const [expectedVersion, currentVersion, expectedSourceHash, installedSourceHash] = await Promise.all([
+				this.installation.packageVersion(),
+				this.installation.installedHelperVersion(),
+				this.installation.bundledHelperSourceHash(),
+				this.installation.installedHelperSourceHash(),
 			]);
-			if (!helperVersionNeedsRefresh(expectedVersion, currentVersion) && !helperBinaryNeedsRefresh(expectedHash, installedHash)) return;
+			if (!helperInstallNeedsRefresh({ expectedVersion, installedVersion: currentVersion, expectedSourceHash, installedSourceHash })) return;
 			// Stop a daemon that still holds the old helper bundle before setup
 			// replaces and signs it. ensureDaemon() will launch the new binary.
+			this.invalidateDaemon();
 			await this.daemonCommand("shutdown", {}, 2_000, signal).catch(() => undefined);
-			await sleep(400, signal);
+			await this.installation.wait(400, signal);
 		}
 
-		// Re-enter Electron and Bun standalone hosts as their JavaScript runtimes.
-		await runProcess(process.execPath, [SETUP_HELPER_SCRIPT, "--runtime"], HELPER_SETUP_TIMEOUT_MS, signal, {
-			...process.env,
-			ELECTRON_RUN_AS_NODE: "1",
-			BUN_BE_BUN: "1",
-		});
+		this.invalidateDaemon();
+		await this.installation.runSetup(signal);
 
-		if (!(await isExecutable(HELPER_APP_EXECUTABLE_PATH))) {
+		if (!(await this.installation.isExecutable())) {
 			throw new Error(`Failed to install pi-computer-use helper app at ${HELPER_APP_PATH}.`);
 		}
 	}

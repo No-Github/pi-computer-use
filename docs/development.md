@@ -89,6 +89,12 @@ On Windows, development uses the Windows platform backend/helper and the active 
 
 On Linux, install Rust/Cargo and run `npm run build:linux`, `npm run test:linux`, and `npm run test:linux-scripts`. Live checks must run inside the target user's graphical D-Bus session. The helper installs to `~/.pi/agent/helpers/pi-computer-use/linux-bridge`.
 
+### macOS helper lifecycle invariants
+
+- `codesign` may change the installed Mach-O bytes. A loose helper install must compare the packaged helper hash with `Contents/Resources/source.sha256`, which records the pre-signing source payload. A pre-signed app may compare its already-signed executable with the byte-for-byte installed copy; never compare an unsigned or differently signed packaged binary directly with the signed installed executable.
+- Any helper replacement attempt must invalidate cached daemon availability and diagnostics before sending `shutdown`. The next command must probe or relaunch the daemon instead of trusting state cached before replacement.
+- Changes to installation, signing, or daemon startup must keep `test:macos-helper-update` green and include a two-call regression: the second `ensureInstalled` plus daemon command must reuse a current installation without returning `ECONNREFUSED`.
+
 ## Release signing
 
 This section applies to macOS releases. macOS TCC keys Accessibility and Screen Recording grants to an app's code-signing identity. Ad-hoc and locally self-signed development builds may require permission review whenever their native code changes. Only Developer ID-signed release bundles should be treated as having a stable update identity.
